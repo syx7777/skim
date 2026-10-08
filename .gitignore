@@ -1,0 +1,24 @@
+# --- secrets ---
+.env
+*.key
+secrets.json
+
+# --- runtime data ---
+data/
+*.log
+
+# --- python ---
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.egg-info/
+dist/
+build/
+
+# --- os ---
+.DS_Store
+Thumbs.db
