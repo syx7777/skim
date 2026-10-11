@@ -33,6 +33,15 @@ def format_timestamp(seconds: float) -> str:
     return f"{hours:02d}:{minutes:02d}:{secs:02d}"
 
 
+def format_srt_timestamp(seconds: float) -> str:
+    """Seconds -> ``HH:MM:SS,mmm`` (SubRip timestamp)."""
+    total_ms = int(round(max(0.0, float(seconds)) * 1000))
+    hours, rest = divmod(total_ms, 3_600_000)
+    minutes, rest = divmod(rest, 60_000)
+    secs, millis = divmod(rest, 1000)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
+
+
 @dataclass
 class TranscriptSegment:
     start: float
@@ -113,6 +122,20 @@ class Transcript:
         path.write_text(
             json.dumps(self.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8"
         )
+
+    def to_srt(self) -> str:
+        """Render as SubRip (.srt) so the transcript can be downloaded and reused."""
+        blocks = [
+            f"{index}\n"
+            f"{format_srt_timestamp(seg.start)} --> {format_srt_timestamp(seg.end)}\n"
+            f"{seg.text.strip()}\n"
+            for index, seg in enumerate(self.segments, start=1)
+        ]
+        return "\n".join(blocks)
+
+    def save_srt(self, path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(self.to_srt(), encoding="utf-8")
 
     @classmethod
     def load(cls, path: Path) -> "Transcript":

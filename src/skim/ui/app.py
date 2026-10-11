@@ -1,4 +1,4 @@
-"""Gradio web UI: upload a lecture, index it, then ask questions."""
+"""Gradio web UI: load a lecture, then ask questions about it."""
 
 from __future__ import annotations
 
@@ -17,16 +17,76 @@ from ..media.transcript import format_timestamp
 
 logger = get_logger("ui")
 
+# Gradio 6 wants theme/css at ``launch()`` time, so they live here and are
+# handed over by the CLI entry point (``skim ui``).
+CSS = """
+.gradio-container { max-width: 1280px !important; margin: 0 auto !important; }
+footer { display: none !important; }
 
-def _as_path(value: Any) -> str | None:
-    """Normalise whatever a Gradio file component hands back into a path."""
-    if value is None:
-        return None
-    if isinstance(value, str):
-        return value or None
-    if isinstance(value, dict):
-        return value.get("path") or value.get("name")
-    return getattr(value, "name", None)
+#skim-hero {
+    text-align: center;
+    padding: 26px 16px 14px;
+}
+#skim-hero h1 {
+    font-size: 32px;
+    font-weight: 700;
+    letter-spacing: -0.5px;
+    margin: 0 0 8px 0;
+}
+#skim-hero p {
+    color: var(--body-text-color-subdued, #6b7280);
+    font-size: 14px;
+    line-height: 1.6;
+    max-width: 760px;
+    margin: 0 auto;
+}
+
+.skim-card {
+    background: var(--block-background-fill, #ffffff);
+    border: 1px solid var(--border-color-primary, #e5e7eb);
+    border-radius: 16px;
+    padding: 8px 18px 16px 18px;
+    box-shadow: 0 1px 3px rgba(15, 23, 42, 0.05);
+}
+.skim-step-title {
+    border-left: 3px solid var(--color-accent, #4f46e5);
+    padding-left: 10px;
+    margin: 10px 0 14px 0;
+    font-size: 15px;
+    font-weight: 600;
+    line-height: 1.4;
+}
+.skim-hint {
+    color: var(--body-text-color-subdued, #6b7280);
+    font-size: 12px;
+    line-height: 1.55;
+}
+.skim-hint code {
+    background: var(--color-accent-soft, #eef2ff);
+    border-radius: 5px;
+    padding: 0 4px;
+}
+"""
+
+HERO = (
+    "# Skim\n"
+    "**Skim a long lecture instead of watching all of it.** Paste a Bilibili / YouTube "
+    "link and ask questions — the agent decides *where* to look: cheap transcript search "
+    "first, vision only on the windows that matter."
+)
+
+
+def build_theme():
+    """Soft, low-contrast theme; system fonts only so it works offline."""
+    import gradio as gr
+
+    return gr.themes.Soft(
+        primary_hue="indigo",
+        neutral_hue="slate",
+        radius_size="lg",
+        font=["ui-sans-serif", "system-ui", "-apple-system", "Segoe UI", "sans-serif"],
+        font_mono=["ui-monospace", "SFMono-Regular", "Consolas", "monospace"],
+    )
 
 
 def _empty_state() -> dict[str, Any]:
@@ -42,7 +102,7 @@ def build_app(settings: Settings | None = None):
     apply_proxy(settings)
 
     # ------------------------------------------------------------------ handlers
-    def process(source_value, subtitle_value, max_height, state):
+    def process(source_value, max_height, state):
         state = state or _empty_state()
         source = (source_value or "").strip()
         if not source:
@@ -52,21 +112,20 @@ def build_app(settings: Settings | None = None):
                 "(e.g. a Bilibili or YouTube URL), or a local file path.",
                 [],
                 None,
+                None,
             )
         if not is_url(source) and not Path(source).is_file():
-            return state, f"**Not a valid link or local file:** `{source}`", [], None
+            return state, f"**Not a valid link or local file:** `{source}`", [], None, None
 
-        subtitle_path = _as_path(subtitle_value)
         try:
             asset = ingest(
                 source,
                 settings=settings,
-                subtitle=subtitle_path,
                 max_height=int(max_height) if max_height else None,
             )
         except Exception as exc:
             logger.exception("ingest failed")
-            return state, f"**Ingest failed:** {exc}", [], None
+            return state, f"**Ingest failed:** {exc}", [], None, None
 
         client = state.get("client") or LLMClient(settings)
         agent = SkimAgent(client, asset, AgentConfig())
@@ -84,27 +143,46 @@ def build_app(settings: Settings | None = None):
             logger.warning("chaptering failed: %s", exc)
             chapter_note = f"chaptering failed: {exc}"
 
+        # Expose the produced transcript (from ASR or cache) as a downloadable .srt.
+        transcript_file: Path | None = None
+        transcript_note = ""
+        if len(asset.transcript) > 0:
+            candidate = asset.cache_dir / "transcript.srt"
+            try:
+                asset.transcript.save_srt(candidate)
+                transcript_file = candidate
+            except OSError as exc:  # pragma: no cover - disk failure
+                logger.warning("could not write transcript: %s", exc)
+        else:
+            transcript_note = " — no speech detected, nothing to download"
+
         state.update({"asset": asset, "agent": agent, "client": client, "chapters": chapters})
         source_line = (
             f"- source: [{asset.title or 'link'}]({asset.source})\n" if asset.is_remote else ""
         )
         status = (
-            f"**Ready.** {asset.display_name}  \n"
+            f"**Ready — {asset.display_name}**  \n"
             + source_line
             + f"- duration: `{format_timestamp(asset.duration)}` ({asset.duration:.0f}s)\n"
             f"- resolution: `{asset.info.width}x{asset.info.height}` @ {asset.info.fps:.2f} fps\n"
-            f"- transcript: `{len(asset.transcript)}` segments ({asset.transcript.source}, "
-            f"lang={asset.transcript.language})\n"
+            f"- transcript: `{len(asset.transcript)}` segments "
+            f"({asset.transcript.source}, lang={asset.transcript.language}){transcript_note}\n"
             f"- {chapter_note}\n"
             f"- local file: `{asset.path}`"
         )
-        return state, status, chapters, str(asset.path)
+        return (
+            state,
+            status,
+            chapters,
+            str(asset.path),
+            str(transcript_file) if transcript_file else None,
+        )
 
     def ask(question, max_steps, use_adaptive, use_memory, use_uncertainty, state):
         state = state or _empty_state()
         agent: SkimAgent | None = state.get("agent")
         if agent is None:
-            return "**Index a video first (step 1).**", [], {}, ""
+            return "**Load a lecture first (step 1).**", [], {}, ""
         if not question or not question.strip():
             return "**Enter a question.**", [], {}, ""
 
@@ -143,31 +221,27 @@ def build_app(settings: Settings | None = None):
 
     # -------------------------------------------------------------------- layout
     with gr.Blocks(title="Skim") as app_ui:
-        gr.Markdown(
-            "# Skim\n"
-            "Paste a **lecture link** (Bilibili / YouTube) and ask questions about it. "
-            "The agent decides *where* to look instead of watching everything: cheap "
-            "transcript search first, then vision only on the windows that matter."
-        )
+        gr.Markdown(HERO, elem_id="skim-hero")
         state = gr.State(_empty_state())
 
         with gr.Row():
-            with gr.Column(scale=1):
-                gr.Markdown("### 1. Load a lecture")
+            # ---------------------------------------------------------- step 1
+            with gr.Column(scale=1, elem_classes="skim-card"):
+                gr.Markdown(
+                    "<div class='skim-step-title'>1 · Load a lecture</div>",
+                    sanitize_html=False,
+                )
                 source_in = gr.Textbox(
                     label="Lecture link or local path",
                     placeholder="https://www.bilibili.com/video/BV.../?p=106",
                     lines=2,
                 )
                 gr.Markdown(
-                    "<small>Paste a Bilibili / YouTube link and the engine downloads it "
-                    "(720p by default, cached under <code>data/downloads/</code>). "
-                    "A local file path also works.</small>",
+                    "<small class='skim-hint'>Paste a Bilibili / YouTube link and the engine "
+                    "downloads it (720p by default, cached under <code>data/downloads/</code>), "
+                    "transcribes it and builds a table of contents. A local file path also works."
+                    "</small>",
                     sanitize_html=False,
-                )
-                subtitle_in = gr.File(
-                    label="Optional transcript (.srt / .vtt / .json) — skips ASR",
-                    file_types=[".srt", ".vtt", ".json"],
                 )
                 with gr.Accordion("Download settings", open=False):
                     max_height_in = gr.Dropdown(
@@ -176,18 +250,28 @@ def build_app(settings: Settings | None = None):
                         label="Max video height",
                         info="720p keeps blackboard handwriting and formulas legible.",
                     )
-                process_btn = gr.Button("Download & index", variant="primary")
+                download_btn = gr.Button("Download", variant="primary")
+
                 status_out = gr.Markdown()
-                preview_out = gr.Video(label="Resolved video", interactive=False, height=240)
-                chapters_out = gr.Dataframe(
-                    headers=["#", "start", "end", "title", "summary"],
-                    label="Table of contents",
-                    wrap=True,
+                transcript_out = gr.File(
+                    label="ASR transcript (.srt) — click to download",
                     interactive=False,
                 )
+                preview_out = gr.Video(label="Resolved video", interactive=False, height=220)
+                with gr.Accordion("Table of contents", open=False):
+                    chapters_out = gr.Dataframe(
+                        headers=["#", "start", "end", "title", "summary"],
+                        column_widths=["6%", "12%", "12%", "28%", "42%"],
+                        wrap=True,
+                        interactive=False,
+                    )
 
-            with gr.Column(scale=2):
-                gr.Markdown("### 2. Ask")
+            # ---------------------------------------------------------- step 2
+            with gr.Column(scale=2, elem_classes="skim-card"):
+                gr.Markdown(
+                    "<div class='skim-step-title'>2 · Ask</div>",
+                    sanitize_html=False,
+                )
                 question_in = gr.Textbox(
                     label="Question",
                     placeholder="老师在哪一段讲了 GRPO 和 PPO 的区别？",
@@ -195,9 +279,15 @@ def build_app(settings: Settings | None = None):
                 )
                 with gr.Accordion("Agent settings / ablations", open=False):
                     max_steps_in = gr.Slider(1, 16, value=8, step=1, label="Max steps")
-                    adaptive_in = gr.Checkbox(value=True, label="Adaptive observation (relevance-driven frame density)")
-                    memory_in = gr.Checkbox(value=True, label="Temporal Memory (avoid re-inspecting)")
-                    uncertainty_in = gr.Checkbox(value=True, label="Uncertainty-based early stopping")
+                    adaptive_in = gr.Checkbox(
+                        value=True, label="Adaptive observation (relevance-driven frame density)"
+                    )
+                    memory_in = gr.Checkbox(
+                        value=True, label="Temporal Memory (avoid re-inspecting)"
+                    )
+                    uncertainty_in = gr.Checkbox(
+                        value=True, label="Uncertainty-based early stopping"
+                    )
                 ask_btn = gr.Button("Ask", variant="primary")
 
                 answer_out = gr.Markdown()
@@ -208,21 +298,14 @@ def build_app(settings: Settings | None = None):
                     metrics_out = gr.JSON(label="Metrics")
                     trace_out = gr.Markdown()
 
-        process_btn.click(
-            process,
-            inputs=[source_in, subtitle_in, max_height_in, state],
-            outputs=[state, status_out, chapters_out, preview_out],
-        )
-        ask_btn.click(
-            ask,
-            inputs=[question_in, max_steps_in, adaptive_in, memory_in, uncertainty_in, state],
-            outputs=[answer_out, evidence_out, metrics_out, trace_out],
-        )
-        question_in.submit(
-            ask,
-            inputs=[question_in, max_steps_in, adaptive_in, memory_in, uncertainty_in, state],
-            outputs=[answer_out, evidence_out, metrics_out, trace_out],
-        )
+        process_btn_inputs = [source_in, max_height_in, state]
+        process_btn_outputs = [state, status_out, chapters_out, preview_out, transcript_out]
+        download_btn.click(process, inputs=process_btn_inputs, outputs=process_btn_outputs)
+
+        ask_inputs = [question_in, max_steps_in, adaptive_in, memory_in, uncertainty_in, state]
+        ask_outputs = [answer_out, evidence_out, metrics_out, trace_out]
+        ask_btn.click(ask, inputs=ask_inputs, outputs=ask_outputs)
+        question_in.submit(ask, inputs=ask_inputs, outputs=ask_outputs)
 
     return app_ui
 
@@ -249,4 +332,4 @@ def _render_trace(result) -> str:
 
 
 if __name__ == "__main__":  # pragma: no cover
-    build_app().launch()
+    build_app().launch(theme=build_theme(), css=CSS)

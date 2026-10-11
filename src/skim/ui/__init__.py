@@ -1,5 +1,5 @@
 """Web UI package."""
 
-from .app import build_app
+from .app import CSS, build_app, build_theme
 
-__all__ = ["build_app"]
+__all__ = ["CSS", "build_app", "build_theme"]

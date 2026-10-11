@@ -168,6 +168,11 @@ def build_chapters(
 
     if not chapters:
         chapters = _uniform_chapters(asset, buckets=6)
+        # A degraded, LLM-less table of contents must not be cached: a transient
+        # network failure would otherwise stick forever and silently drop every
+        # chapter summary/keyword. Leaving it uncached means the next run retries.
+        logger.info("uniform fallback chapters are not cached; the LLM will be retried")
+        return chapters
 
     chapters.sort(key=lambda chapter: chapter.start)
     for position, chapter in enumerate(chapters):

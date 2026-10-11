@@ -253,11 +253,19 @@ def ui(
     """Launch the web UI."""
     _bootstrap(log_level)
     try:
-        from .ui.app import build_app
+        from .ui.app import CSS, build_app, build_theme
+
+        build_app().launch(
+            server_name=host,
+            server_port=port,
+            share=share,
+            show_error=True,
+            theme=build_theme(),
+            css=CSS,
+        )
     except ImportError as exc:  # pragma: no cover
         console.print(f"[red]Gradio is not installed: {exc}[/red]")
         raise typer.Exit(code=1)
-    build_app().launch(server_name=host, server_port=port, share=share, show_error=True)
 
 
 # ----------------------------------------------------------------------- info
